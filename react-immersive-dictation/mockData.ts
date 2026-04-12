@@ -1,0 +1,76 @@
+import type { DictationItem } from "./types";
+
+export const mockDictationItems: DictationItem[] = [
+  {
+    id: "priority",
+    word: "priority",
+    phonetic: "/praɪˈɒrəti/",
+    meaning: "优先事项",
+    isReview: false,
+  },
+  {
+    id: "accommodation",
+    word: "accommodation",
+    phonetic: "/əˌkɒməˈdeɪʃən/",
+    meaning: "住处；住宿",
+    isReview: false,
+  },
+  {
+    id: "colour",
+    word: "colour",
+    acceptedAnswers: ["color"],
+    phonetic: "/ˈkʌlə(r)/",
+    meaning: "颜色",
+    isReview: true,
+  },
+  {
+    id: "destination",
+    word: "destination",
+    phonetic: "/ˌdestɪˈneɪʃən/",
+    meaning: "目的地",
+    isReview: false,
+  },
+  {
+    id: "schedule",
+    word: "schedule",
+    phonetic: "/ˈʃedjuːl/",
+    meaning: "时间表；安排",
+    isReview: true,
+  },
+  {
+    id: "separate",
+    word: "separate",
+    phonetic: "/ˈsepərət/",
+    meaning: "分开的",
+    isReview: false,
+  },
+  {
+    id: "environment",
+    word: "environment",
+    phonetic: "/ɪnˈvaɪrənmənt/",
+    meaning: "环境",
+    isReview: true,
+  },
+  {
+    id: "receipt",
+    word: "receipt",
+    phonetic: "/rɪˈsiːt/",
+    meaning: "收据",
+    isReview: false,
+  },
+  {
+    id: "neighbour",
+    word: "neighbour",
+    acceptedAnswers: ["neighbor"],
+    phonetic: "/ˈneɪbə(r)/",
+    meaning: "邻居",
+    isReview: true,
+  },
+  {
+    id: "temperature",
+    word: "temperature",
+    phonetic: "/ˈtemprətʃə(r)/",
+    meaning: "温度",
+    isReview: false,
+  },
+];

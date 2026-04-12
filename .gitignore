@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.cache/
+.pycache/
+__pycache__/
+saved-sites/
+audio/
+*.pyc
+*.pyo
+*.pyd
+/.vendor/
+/german-vocab-site/.vendor/
+/german-vocab-site/.cache/
+/german-vocab-site/.env
+/german-vocab-site/.pycache/
+/german-vocab-site/__pycache__/

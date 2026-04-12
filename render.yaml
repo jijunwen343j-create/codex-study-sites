@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: german-vocab-site
+    runtime: python
+    rootDir: german-vocab-site
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    plan: free
