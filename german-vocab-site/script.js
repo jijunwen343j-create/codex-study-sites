@@ -299,10 +299,45 @@ const reviewIntervals = {
   average: 3,
   unfamiliar: 1,
 };
-const DICTATION_DAILY_LIMIT = 50;
-const DICTATION_REVIEW_RATIO = 0.9;
+const DICTATION_DAILY_LIMIT = 30;
+const DICTATION_WRONG_TARGET = 5;
+const DICTATION_REVIEW_TARGET = 15;
 const DICTATION_REPEAT_OPTIONS = [1, 2, 3];
 const DICTATION_SPEED_OPTIONS = [0.8, 1, 1.2];
+const DICTATION_REVIEW_INTERVALS = [1, 3, 7, 14];
+const DICTATION_PLAN_VERSION = "curriculum-v1";
+const DICTATION_CURRICULUM_STAGES = [
+  {
+    id: "foundation",
+    titleZh: "生活基础",
+    titleEn: "Foundations",
+    topicIds: ["menschen-und-kontakte", "gefuehle-und-routinen", "wohnen-und-einkaufen", "reisen-und-unterwegs"],
+  },
+  {
+    id: "study-work-core",
+    titleZh: "学习与工作基础",
+    titleEn: "Study and Work Core",
+    topicIds: ["lernen-und-pruefungen", "beruf-und-buero", "arbeitsmodelle-und-stellenmarkt"],
+  },
+  {
+    id: "application-office",
+    titleZh: "求职与办公室沟通",
+    titleEn: "Applications and Office Communication",
+    topicIds: ["anerkennung-und-bewerbung", "bewerbung-und-lebenslauf-vertiefung", "bueroalltag-und-service"],
+  },
+  {
+    id: "workplace-rules",
+    titleZh: "入职与办公室规则",
+    titleEn: "Workplace Rules",
+    topicIds: ["arbeitsalltag-und-regelungen", "unternehmen-und-empfang", "duales-studium-und-berufsstart"],
+  },
+  {
+    id: "specialized-work",
+    titleZh: "专业与进阶工作场景",
+    titleEn: "Specialized Work",
+    topicIds: ["ausbildung-technik-und-arbeitsmarkt", "unternehmen-und-abteilungen", "arbeitsdruck-und-entwicklung"],
+  },
+];
 
 function createDefaultDictationUiState() {
   return {
@@ -326,6 +361,7 @@ function getDefaultDictationPreferences() {
 function getDefaultDailyDictation() {
   return {
     date: "",
+    sourceSignature: "",
     deckIds: [],
     reviewIds: [],
     newIds: [],
@@ -366,6 +402,7 @@ function getDefaultStore() {
     filter: "all",
     voice: "de-DE",
     wordStatus: {},
+    dictationProgress: {},
     topicMastery: {},
     topicReviewPlan: {},
     customWords: [],
@@ -383,6 +420,7 @@ function loadStore() {
       ...getDefaultStore(),
       ...parsed,
       wordStatus: parsed.wordStatus || {},
+      dictationProgress: parsed.dictationProgress || {},
       topicMastery: parsed.topicMastery || {},
       topicReviewPlan: parsed.topicReviewPlan || {},
       customWords: parsed.customWords || [],
@@ -394,6 +432,7 @@ function loadStore() {
       dailyDictation: {
         ...getDefaultDailyDictation(),
         ...(parsed.dailyDictation || {}),
+        sourceSignature: parsed.dailyDictation?.sourceSignature || "",
         deckIds: parsed.dailyDictation?.deckIds || [],
         reviewIds: parsed.dailyDictation?.reviewIds || [],
         newIds: parsed.dailyDictation?.newIds || [],
@@ -482,6 +521,62 @@ function getWordsForCategory(category) {
   return category.topics.flatMap((topic) => getWordsForTopic(topic));
 }
 
+function findTopicById(topicId) {
+  return categories.flatMap((category) => category.topics).find((topic) => topic.id === topicId) || null;
+}
+
+function findCategoryByTopicId(topicId) {
+  return categories.find((category) => category.topics.some((topic) => topic.id === topicId)) || null;
+}
+
+function getCurriculumTopicEntries() {
+  const entries = [];
+  const seenTopicIds = new Set();
+
+  DICTATION_CURRICULUM_STAGES.forEach((stage, stageIndex) => {
+    stage.topicIds.forEach((topicId, topicIndex) => {
+      const topic = findTopicById(topicId);
+      const category = findCategoryByTopicId(topicId);
+
+      if (!topic || !category || seenTopicIds.has(topicId)) {
+        return;
+      }
+
+      entries.push({
+        stageId: stage.id,
+        stageTitleZh: stage.titleZh,
+        stageTitleEn: stage.titleEn,
+        stageOrder: stageIndex + 1,
+        topicOrder: topicIndex,
+        category,
+        topic,
+      });
+      seenTopicIds.add(topicId);
+    });
+  });
+
+  categories.forEach((category) => {
+    category.topics.forEach((topic) => {
+      if (seenTopicIds.has(topic.id)) {
+        return;
+      }
+
+      entries.push({
+        stageId: "supplement",
+        stageTitleZh: "补充词库",
+        stageTitleEn: "Supplement",
+        stageOrder: DICTATION_CURRICULUM_STAGES.length + 1,
+        topicOrder: entries.length,
+        category,
+        topic,
+      });
+      seenTopicIds.add(topic.id);
+    });
+  });
+
+  return entries;
+}
+
 function slugifyValue(value) {
   return normalizeLatinText(value)
     .replace(/[^a-z0-9]+/g, "-")
@@ -537,6 +632,92 @@ function buildWordAliases(value) {
 
   return aliases;
 }
+
+function createCuratedWordId(topicId, sectionId, word) {
+  return `curated-${topicId}-${sectionId}-${slugifyValue(word) || "word"}`;
+}
+
+function hasKnownWordAlias(wordText) {
+  const targetAliases = buildWordAliases(wordText);
+
+  if (!targetAliases.size) {
+    return false;
+  }
+
+  return categories.some((category) =>
+    category.topics.some((topic) =>
+      topic.sections.some((section) =>
+        section.words.some((word) => {
+          const existingAliases = buildWordAliases(word.word);
+          return [...targetAliases].some((alias) => existingAliases.has(alias));
+        })
+      )
+    )
+  );
+}
+
+function hydrateImportedGermanTopics() {
+  const importedTopics = Array.isArray(window.IMPORTED_GERMAN_TOPICS) ? window.IMPORTED_GERMAN_TOPICS : [];
+  const studyWorkCategory = categories.find((category) => category.id === "studium-und-arbeit");
+
+  if (!studyWorkCategory || !importedTopics.length) {
+    return;
+  }
+
+  const existingTopicIds = new Set(studyWorkCategory.topics.map((topic) => topic.id));
+
+  for (const rawTopic of importedTopics) {
+    if (!rawTopic?.id || existingTopicIds.has(rawTopic.id)) {
+      continue;
+    }
+
+    const seenWordSignatures = new Set();
+    const sections = (rawTopic.sections || [])
+      .map((rawSection) => {
+        const words = (rawSection.words || [])
+          .map((rawWord) => {
+            const [word, definitionEn, definitionZh, noteZh = ""] = Array.isArray(rawWord)
+              ? rawWord
+              : [rawWord.word, rawWord.definitionEn, rawWord.definitionZh, rawWord.noteZh || ""];
+            const signature = [...buildWordAliases(word)].sort().join("|");
+
+            if (!word || !definitionEn || !definitionZh || !signature) {
+              return null;
+            }
+
+            if (seenWordSignatures.has(signature) || hasKnownWordAlias(word)) {
+              return null;
+            }
+
+            seenWordSignatures.add(signature);
+            return createWord(createCuratedWordId(rawTopic.id, rawSection.id, word), word, definitionEn, definitionZh, noteZh);
+          })
+          .filter(Boolean);
+
+        if (!words.length) {
+          return null;
+        }
+
+        return {
+          ...rawSection,
+          words,
+        };
+      })
+      .filter(Boolean);
+
+    if (!sections.length) {
+      continue;
+    }
+
+    studyWorkCategory.topics.push({
+      ...rawTopic,
+      sections,
+    });
+    existingTopicIds.add(rawTopic.id);
+  }
+}
+
+hydrateImportedGermanTopics();
 
 function createPlacementValue(categoryId, topicId, sectionId) {
   return [categoryId, topicId, sectionId].join("::");
@@ -743,6 +924,14 @@ function extractPhoneticFromNote(noteZh) {
   return matched ? matched[0] : "";
 }
 
+function isDateDue(isoString, now = new Date()) {
+  if (!isoString) {
+    return false;
+  }
+
+  return getStartOfDay(new Date(isoString)).getTime() <= getStartOfDay(now).getTime();
+}
+
 function isTopicDueForReview(topicId) {
   const plan = store.topicReviewPlan[topicId];
 
@@ -789,6 +978,151 @@ function buildDictationSourceItems() {
   );
 }
 
+function getDictationProgressEntry(wordId) {
+  return store.dictationProgress[wordId] || null;
+}
+
+function getIntroducedDictationWordIds(validIds = null) {
+  return new Set(
+    Object.entries(store.dictationProgress)
+      .filter(([wordId, entry]) => Boolean(entry?.introducedAt) && (!validIds || validIds.has(wordId)))
+      .map(([wordId]) => wordId)
+  );
+}
+
+function buildDictationSourceSignature(sourceItems = buildDictationSourceItems()) {
+  return `${DICTATION_PLAN_VERSION}::${sourceItems
+    .map((item) => item.id)
+    .sort()
+    .join("|")}`;
+}
+
+function getCurriculumTopicItemsById(sourceItems) {
+  const map = new Map();
+
+  sourceItems.forEach((item, index) => {
+    if (!map.has(item.topicId)) {
+      map.set(item.topicId, []);
+    }
+
+    map.get(item.topicId).push({
+      ...item,
+      sourceIndex: index,
+    });
+  });
+
+  return map;
+}
+
+function getDictationCurriculumProgress(sourceItems = buildDictationSourceItems()) {
+  const validIds = new Set(sourceItems.map((item) => item.id));
+  const introducedIds = getIntroducedDictationWordIds(validIds);
+  const topicItemsById = getCurriculumTopicItemsById(sourceItems);
+  const topicEntries = getCurriculumTopicEntries()
+    .map((entry) => {
+      const topicItems = topicItemsById.get(entry.topic.id) || [];
+      const introducedCount = topicItems.filter((item) => introducedIds.has(item.id)).length;
+
+      return {
+        ...entry,
+        totalWords: topicItems.length,
+        introducedCount,
+        remainingCount: Math.max(0, topicItems.length - introducedCount),
+      };
+    })
+    .filter((entry) => entry.totalWords > 0);
+
+  const currentEntry = topicEntries.find((entry) => entry.remainingCount > 0) || topicEntries[topicEntries.length - 1] || null;
+
+  return {
+    topicEntries,
+    currentEntry,
+    introducedCount: introducedIds.size,
+    totalCount: sourceItems.length,
+    completedTopicCount: topicEntries.filter((entry) => entry.remainingCount === 0).length,
+    totalTopicCount: topicEntries.length,
+    coveragePercent: sourceItems.length ? Math.round((introducedIds.size / sourceItems.length) * 100) : 0,
+  };
+}
+
+function getOrderedNewDictationItems(sourceItems, limit) {
+  if (limit <= 0) {
+    return [];
+  }
+
+  const validIds = new Set(sourceItems.map((item) => item.id));
+  const introducedIds = getIntroducedDictationWordIds(validIds);
+  const topicItemsById = getCurriculumTopicItemsById(sourceItems);
+  const orderedItems = [];
+
+  for (const entry of getCurriculumTopicEntries()) {
+    const pendingItems = (topicItemsById.get(entry.topic.id) || []).filter((item) => !introducedIds.has(item.id));
+
+    if (!pendingItems.length) {
+      continue;
+    }
+
+    orderedItems.push(...pendingItems);
+
+    if (orderedItems.length >= limit) {
+      break;
+    }
+  }
+
+  return orderedItems.slice(0, limit);
+}
+
+function sortDictationReviewItems(items, topicOrderMap) {
+  return [...items].sort((left, right) => {
+    const leftProgress = getDictationProgressEntry(left.id) || {};
+    const rightProgress = getDictationProgressEntry(right.id) || {};
+    const leftDue = new Date(leftProgress.nextReviewAt || leftProgress.lastReviewedAt || leftProgress.introducedAt || 0).getTime();
+    const rightDue = new Date(rightProgress.nextReviewAt || rightProgress.lastReviewedAt || rightProgress.introducedAt || 0).getTime();
+
+    if (leftDue !== rightDue) {
+      return leftDue - rightDue;
+    }
+
+    const leftStage = Number.isInteger(leftProgress.reviewStage) ? leftProgress.reviewStage : -1;
+    const rightStage = Number.isInteger(rightProgress.reviewStage) ? rightProgress.reviewStage : -1;
+
+    if (leftStage !== rightStage) {
+      return leftStage - rightStage;
+    }
+
+    const topicDiff = (topicOrderMap.get(left.topicId) || 0) - (topicOrderMap.get(right.topicId) || 0);
+
+    if (topicDiff !== 0) {
+      return topicDiff;
+    }
+
+    return (left.sourceIndex || 0) - (right.sourceIndex || 0);
+  });
+}
+
+function buildMixedDictationDeck(newItems, reviewItems, wrongItems) {
+  const deck = [];
+  const newQueue = [...newItems];
+  const reviewQueue = [...reviewItems];
+  const wrongQueue = [...wrongItems];
+
+  while (newQueue.length || reviewQueue.length || wrongQueue.length) {
+    if (newQueue.length) {
+      deck.push(newQueue.shift());
+    }
+
+    if (reviewQueue.length) {
+      deck.push(reviewQueue.shift());
+    }
+
+    if (wrongQueue.length) {
+      deck.push(wrongQueue.shift());
+    }
+  }
+
+  return deck;
+}
+
 function interleaveDictationDeck(newItems, reviewItems, reviewRatio) {
   const result = [];
   const newQueue = [...newItems];
@@ -817,40 +1151,81 @@ function interleaveDictationDeck(newItems, reviewItems, reviewRatio) {
 
 function buildDailyDictationPlan() {
   const allItems = buildDictationSourceItems();
-  const dailyCount = Math.min(DICTATION_DAILY_LIMIT, allItems.length);
-  const reviewItems = allItems.filter((item) => item.isReview);
-  const newItems = allItems.filter((item) => !item.isReview);
-  const desiredReviewCount = Math.min(reviewItems.length, Math.round(dailyCount * DICTATION_REVIEW_RATIO));
-  const desiredNewCount = Math.min(newItems.length, Math.max(0, dailyCount - desiredReviewCount));
-  const pickedReviewItems = reviewItems.slice(0, desiredReviewCount);
-  const pickedNewItems = newItems.slice(0, desiredNewCount);
-  const pickedIds = new Set([...pickedReviewItems, ...pickedNewItems].map((item) => item.id));
-  const missingCount = dailyCount - pickedReviewItems.length - pickedNewItems.length;
-  const topUpItems = allItems.filter((item) => !pickedIds.has(item.id)).slice(0, Math.max(0, missingCount));
-  const deck = interleaveDictationDeck(
-    [...pickedNewItems, ...topUpItems.filter((item) => !item.isReview)],
-    [...pickedReviewItems, ...topUpItems.filter((item) => item.isReview)],
-    DICTATION_REVIEW_RATIO
-  ).slice(0, dailyCount);
+  const validIds = new Set(allItems.map((item) => item.id));
+  const introducedIds = getIntroducedDictationWordIds(validIds);
+  const topicOrderMap = new Map(getCurriculumTopicEntries().map((entry, index) => [entry.topic.id, index]));
+  const introducedItems = allItems
+    .map((item, index) => ({
+      ...item,
+      sourceIndex: index,
+    }))
+    .filter((item) => introducedIds.has(item.id));
+  const wrongCandidates = sortDictationReviewItems(
+    introducedItems.filter((item) => {
+      const progress = getDictationProgressEntry(item.id);
+      return progress?.lastOutcome === "wrong" && isDateDue(progress.nextReviewAt || progress.lastReviewedAt || progress.introducedAt);
+    }),
+    topicOrderMap
+  );
+  const reviewCandidates = sortDictationReviewItems(
+    introducedItems.filter((item) => {
+      const progress = getDictationProgressEntry(item.id);
+      return progress?.lastOutcome !== "wrong" && isDateDue(progress?.nextReviewAt);
+    }),
+    topicOrderMap
+  );
+  const pickedWrongItems = wrongCandidates.slice(0, DICTATION_WRONG_TARGET);
+  const pickedWrongIds = new Set(pickedWrongItems.map((item) => item.id));
+  const pickedReviewItems = reviewCandidates.filter((item) => !pickedWrongIds.has(item.id)).slice(0, DICTATION_REVIEW_TARGET);
+  const remainingSlots = Math.max(0, Math.min(DICTATION_DAILY_LIMIT, allItems.length) - pickedWrongItems.length - pickedReviewItems.length);
+  const pickedNewItems = getOrderedNewDictationItems(allItems, remainingSlots);
+  const deck = buildMixedDictationDeck(pickedNewItems, pickedReviewItems, pickedWrongItems).slice(0, DICTATION_DAILY_LIMIT);
 
   return {
     deckIds: deck.map((item) => item.id),
-    reviewIds: deck.filter((item) => item.isReview).map((item) => item.id),
-    newIds: deck.filter((item) => !item.isReview).map((item) => item.id),
+    reviewIds: pickedReviewItems.map((item) => item.id),
+    newIds: pickedNewItems.map((item) => item.id),
   };
 }
 
 function ensureDailyDictationState() {
   const todayKey = getTodayKey();
   const sourceItems = buildDictationSourceItems();
+  const sourceSignature = buildDictationSourceSignature(sourceItems);
   const validIds = new Set(sourceItems.map((item) => item.id));
   let didChange = false;
 
-  if (store.dailyDictation.date !== todayKey || !store.dailyDictation.deckIds.length) {
+  Object.keys(store.dictationProgress).forEach((wordId) => {
+    if (!validIds.has(wordId)) {
+      delete store.dictationProgress[wordId];
+      didChange = true;
+    }
+  });
+
+  if (
+    store.dailyDictation.date !== todayKey ||
+    !store.dailyDictation.deckIds.length ||
+    store.dailyDictation.sourceSignature !== sourceSignature
+  ) {
+    const nextPlan = buildDailyDictationPlan();
+    const nextDeckSet = new Set(nextPlan.deckIds);
+    const canPreserveTodayProgress = store.dailyDictation.date === todayKey;
+    const preservedCompletedIds = canPreserveTodayProgress
+      ? store.dailyDictation.completedIds.filter((id) => nextDeckSet.has(id))
+      : [];
+    const preservedWrongIds = canPreserveTodayProgress
+      ? store.dailyDictation.wrongIds.filter((id) => nextDeckSet.has(id))
+      : [];
+
     store.dailyDictation = {
       ...getDefaultDailyDictation(),
       date: todayKey,
-      ...buildDailyDictationPlan(),
+      sourceSignature,
+      ...nextPlan,
+      completedIds: preservedCompletedIds,
+      wrongIds: preservedWrongIds,
+      currentIndex: canPreserveTodayProgress ? Math.min(store.dailyDictation.currentIndex || 0, nextPlan.deckIds.length) : 0,
+      startedAt: canPreserveTodayProgress ? store.dailyDictation.startedAt : null,
     };
     didChange = true;
   }
@@ -862,6 +1237,7 @@ function ensureDailyDictationState() {
       ...store.dailyDictation,
       ...buildDailyDictationPlan(),
       date: todayKey,
+      sourceSignature,
     };
     didChange = true;
   }
@@ -892,6 +1268,7 @@ function getCurrentDictationItem() {
 
 function getDailyDictationStats() {
   const state = ensureDailyDictationState();
+  const curriculum = getDictationCurriculumProgress();
   const completedSet = new Set(state.completedIds);
   const progressedCount = Math.max(state.currentIndex, state.completedIds.length);
   const reviewCompleted = state.reviewIds.filter((id) => completedSet.has(id)).length;
@@ -903,6 +1280,15 @@ function getDailyDictationStats() {
     newCount: state.newIds.length,
     completedCount: state.completedIds.length,
     wrongCount: state.wrongIds.length,
+    currentTopicTitle: curriculum.currentEntry?.topic.title || "综合复习",
+    currentStageLabel: curriculum.currentEntry?.stageTitleZh || "课程复习",
+    currentStageOrder: curriculum.currentEntry?.stageOrder || 0,
+    remainingTopicWords: curriculum.currentEntry?.remainingCount || 0,
+    introducedCount: curriculum.introducedCount,
+    totalSourceCount: curriculum.totalCount,
+    completedTopicCount: curriculum.completedTopicCount,
+    totalTopicCount: curriculum.totalTopicCount,
+    coveragePercent: curriculum.coveragePercent,
     progressedCount,
     reviewCompleted,
     newCompleted,
@@ -1021,6 +1407,52 @@ function evaluateDictationAttempt(inputValue, item) {
     kind: "wrong",
     bestAnswer: item.displayWord,
   };
+}
+
+function upsertDictationProgress(item, outcome) {
+  if (!item) {
+    return;
+  }
+
+  const now = new Date();
+  const existing = store.dictationProgress[item.id] || {};
+  const nextEntry = {
+    introducedAt: existing.introducedAt || now.toISOString(),
+    lastReviewedAt: now.toISOString(),
+    nextReviewAt: existing.nextReviewAt || "",
+    reviewStage: Number.isInteger(existing.reviewStage) ? existing.reviewStage : -1,
+    attempts: (existing.attempts || 0) + 1,
+    correctCount: existing.correctCount || 0,
+    lastOutcome: outcome,
+    topicId: item.topicId,
+  };
+
+  if (outcome === "correct") {
+    const nextStage = Math.min(nextEntry.reviewStage + 1, DICTATION_REVIEW_INTERVALS.length - 1);
+    nextEntry.reviewStage = nextStage;
+    nextEntry.correctCount += 1;
+    nextEntry.nextReviewAt = addDays(now, DICTATION_REVIEW_INTERVALS[nextStage]).toISOString();
+  } else if (outcome === "wrong") {
+    nextEntry.reviewStage = 0;
+    nextEntry.nextReviewAt = addDays(now, 1).toISOString();
+  }
+
+  store.dictationProgress[item.id] = nextEntry;
+}
+
+function syncManualDictationStatus(item, status) {
+  if (!item) {
+    return;
+  }
+
+  if (status === "known") {
+    upsertDictationProgress(item, "correct");
+    store.dictationProgress[item.id].reviewStage = Math.max(store.dictationProgress[item.id].reviewStage, 2);
+    store.dictationProgress[item.id].nextReviewAt = addDays(new Date(), DICTATION_REVIEW_INTERVALS[2]).toISOString();
+    return;
+  }
+
+  upsertDictationProgress(item, "wrong");
 }
 
 function findTopicByWordId(wordId) {
@@ -1282,8 +1714,12 @@ function renderDailyDictationCard(stats) {
       <div class="daily-dictation-copy">
         <p class="eyebrow">German Dictation</p>
         <h2>每日德语默写</h2>
-        <p>每天固定一组德语词，进去后直接开始播放、输入、核对答案，并按当天的复习进度继续往下走。</p>
+        <p>每天按“从简单到难”的主题计划推进。系统会先带你走当前主题的新词，再混入到期复习词和错词回炉，直到整套词库都被逐步覆盖。</p>
         <div class="daily-dictation-meta">
+          <span class="tag">第 ${stats.currentStageOrder || 1} 阶段 · ${escapeHtml(stats.currentStageLabel)}</span>
+          <span class="tag highlight">${escapeHtml(stats.currentTopicTitle)}</span>
+          <span class="tag">当前主题剩余 ${stats.remainingTopicWords} 词</span>
+          <span class="tag">总覆盖 ${stats.introducedCount}/${stats.totalSourceCount}</span>
           <span class="tag">${stats.totalCount} 词计划</span>
           <span class="tag">${stats.reviewCount} 词复习</span>
           <span class="tag">${stats.newCount} 词新学</span>
@@ -1344,10 +1780,12 @@ function renderTopBanner(mode, category) {
 
 function renderCategoryCard(category) {
   const stats = getCategoryStats(category);
+  const topicCountLabel = `${category.topics.length} 个专题`;
+  const wordCountLabel = stats.totalWords ? `${stats.totalWords} 个词条` : "内容待更新";
   const progressCaption = stats.totalWords
     ? stats.started
       ? `${stats.percentage}% 学习进度`
-      : `共 ${stats.totalWords} 个词条，尚未开始`
+      : "尚未开始"
     : "内容待更新";
   const statusTag = stats.totalWords
     ? stats.fullyMastered
@@ -1369,6 +1807,10 @@ function renderCategoryCard(category) {
       <span class="card-icon" style="background:${category.tint};color:${category.accent};">${category.icon}</span>
       <h3>${escapeHtml(category.nameZh)}</h3>
       <p>${escapeHtml(category.nameEn)}</p>
+      <div class="category-meta">
+        <span>${topicCountLabel}</span>
+        <span>${wordCountLabel}</span>
+      </div>
       <div class="category-card-footer">
         <div class="progress-caption">
           <span>${progressCaption}</span>
@@ -1401,6 +1843,7 @@ function getDictationAutoAdvanceSeconds() {
 
 function renderDictationStage(item) {
   const dictationState = ensureDailyDictationState();
+  const stats = getDailyDictationStats();
   const resultKind = uiState.dictation.resultKind;
   const autoAdvanceSeconds = getDictationAutoAdvanceSeconds();
   const currentStatus = item ? getWordStatus(item.id) : null;
@@ -1410,7 +1853,7 @@ function renderDictationStage(item) {
       <section class="dictation-stage-card dictation-stage-card--idle">
         <p class="dictation-stage-kicker">今日默写完成</p>
         <h2>今天的德语默写已经完成</h2>
-        <p>你可以返回首页继续复习其它模块，或者明天再回来继续新的每日德语默写计划。</p>
+        <p>当前主题为 ${escapeHtml(stats.currentTopicTitle)}。你可以返回首页继续复习其它模块，或者明天再回来继续下一轮主题计划。</p>
       </section>
     `;
   }
@@ -1420,7 +1863,7 @@ function renderDictationStage(item) {
       <section class="dictation-stage-card dictation-stage-card--idle" data-action="dictation-start">
         <p class="dictation-stage-kicker">准备开始</p>
         <h2>点击播放后开始德语听写</h2>
-        <p>下方保留了和视频一致的三个主按钮：上一个单词、再听一遍、核对答案。</p>
+        <p>今天主练 ${escapeHtml(stats.currentTopicTitle)}，当前主题还有 ${stats.remainingTopicWords} 个词待引入。下方保留了和视频一致的三个主按钮：上一个单词、再听一遍、核对答案。</p>
       </section>
     `;
   }
@@ -1489,7 +1932,8 @@ function renderDictationPage() {
           <div class="dictation-topbar__left">
             <button class="dictation-back-btn" data-action="go-home" aria-label="返回首页">‹</button>
             <div class="dictation-title">
-              <strong>每日默写 - 德语词汇</strong>
+              <span class="dictation-title-kicker">第 ${stats.currentStageOrder || 1} 阶段 · ${escapeHtml(stats.currentStageLabel)}</span>
+              <strong>每日默写 - ${escapeHtml(stats.currentTopicTitle)}</strong>
             </div>
           </div>
 
@@ -1531,6 +1975,8 @@ function renderDictationPage() {
           </div>
           <div class="dictation-footer__meta">
             <div class="dictation-footer__tags">
+              <span>总覆盖：${stats.introducedCount}/${stats.totalSourceCount} ${stats.coveragePercent}%</span>
+              <span>当前主题剩余：${stats.remainingTopicWords} 词</span>
               <span>今日计划总词量：${stats.totalCount} 词</span>
               <span>今日应复习单词：${stats.reviewCount} 词</span>
               ${stats.wrongCount ? `<span class="highlight">再练推荐 ${stats.wrongCount}</span>` : ""}
@@ -2452,6 +2898,7 @@ function markCurrentDictationWord(status) {
     return;
   }
 
+  syncManualDictationStatus(currentItem, status);
   updateWordStatus(currentItem.id, status);
 }
 
@@ -2484,8 +2931,14 @@ function checkCurrentDictationAnswer() {
     dictationState.completedIds.push(currentItem.id);
   }
 
-  if (result.kind !== "correct" && !dictationState.wrongIds.includes(currentItem.id)) {
-    dictationState.wrongIds.push(currentItem.id);
+  if (result.kind === "correct") {
+    upsertDictationProgress(currentItem, "correct");
+  } else {
+    upsertDictationProgress(currentItem, "wrong");
+
+    if (!dictationState.wrongIds.includes(currentItem.id)) {
+      dictationState.wrongIds.push(currentItem.id);
+    }
   }
 
   persistStore(false);
