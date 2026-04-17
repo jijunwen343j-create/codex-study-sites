@@ -55,30 +55,37 @@ EDGE_VOICE_MAP = {
 GOOGLE_VOICE_MAP = {
     "de-DE": {
         "languageCode": "de-DE",
+        "name": "de-DE-Standard-G",
         "ssmlGender": "FEMALE",
     },
     "de-AT": {
         "languageCode": "de-DE",
+        "name": "de-DE-Standard-G",
         "ssmlGender": "FEMALE",
     },
     "de-CH": {
         "languageCode": "de-DE",
+        "name": "de-DE-Standard-G",
         "ssmlGender": "FEMALE",
     },
     "edge-de": {
         "languageCode": "de-DE",
+        "name": "de-DE-Standard-G",
         "ssmlGender": "FEMALE",
     },
     "edge-de-conrad": {
         "languageCode": "de-DE",
+        "name": "de-DE-Standard-H",
         "ssmlGender": "MALE",
     },
     "edge-at": {
         "languageCode": "de-DE",
+        "name": "de-DE-Standard-G",
         "ssmlGender": "FEMALE",
     },
     "edge-ch": {
         "languageCode": "de-DE",
+        "name": "de-DE-Standard-G",
         "ssmlGender": "FEMALE",
     },
 }

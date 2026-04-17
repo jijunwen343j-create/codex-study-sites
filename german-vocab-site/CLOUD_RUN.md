@@ -5,6 +5,7 @@
 - 服务启动入口由 `Procfile` 指定为 `python server.py`
 - Python 版本固定为 `3.12`
 - Google TTS 会优先使用 Google Application Default Credentials
+- 德语 Google 发音已固定为最省钱的 `Standard` 音色
 - 在 Cloud Run 上不需要再上传 service account JSON key
 
 ## 一次性准备
