@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import json
 import mimetypes
@@ -15,19 +16,30 @@ from urllib import request as urllib_request
 sys.path.insert(0, str((Path(__file__).parent / ".vendor").resolve()))
 import edge_tts
 
+try:
+    import requests
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from google.oauth2 import service_account
+except Exception:
+    requests = None
+    GoogleAuthRequest = None
+    service_account = None
+
 
 ROOT = Path(__file__).parent.resolve()
 CACHE_DIR = ROOT / ".cache" / "tts"
 ENV_FILE = ROOT / ".env"
-CACHE_VERSION = "edge-v4"
-DEFAULT_VOICE = "de-DE-KatjaNeural"
+CACHE_VERSION = "tts-v5"
+DEFAULT_VOICE = "de-DE"
 DEFAULT_FORMAT = "mp3"
 DEFAULT_RATE = "0%"
 WORD_LOOKUP_ENDPOINT = "https://api.dictionaryapi.dev/api/v2/entries/de/"
 TRANSLATE_ENDPOINT = "https://api.mymemory.translated.net/get"
+GOOGLE_TTS_ENDPOINT = "https://texttospeech.googleapis.com/v1/text:synthesize"
+GOOGLE_TTS_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SCRIPT_PATH = ROOT / "script.js"
 BOOK_NOTES_PATH = ROOT / "de_notes.json"
-VOICE_MAP = {
+EDGE_VOICE_MAP = {
     "de-DE": "de-DE-KatjaNeural",
     "de-AT": "de-AT-IngridNeural",
     "de-CH": "de-CH-LeniNeural",
@@ -36,12 +48,44 @@ VOICE_MAP = {
     "edge-at": "de-AT-IngridNeural",
     "edge-ch": "de-CH-LeniNeural",
 }
+GOOGLE_VOICE_MAP = {
+    "de-DE": {
+        "languageCode": "de-DE",
+        "ssmlGender": "FEMALE",
+    },
+    "de-AT": {
+        "languageCode": "de-DE",
+        "ssmlGender": "FEMALE",
+    },
+    "de-CH": {
+        "languageCode": "de-DE",
+        "ssmlGender": "FEMALE",
+    },
+    "edge-de": {
+        "languageCode": "de-DE",
+        "ssmlGender": "FEMALE",
+    },
+    "edge-de-conrad": {
+        "languageCode": "de-DE",
+        "ssmlGender": "MALE",
+    },
+    "edge-at": {
+        "languageCode": "de-DE",
+        "ssmlGender": "FEMALE",
+    },
+    "edge-ch": {
+        "languageCode": "de-DE",
+        "ssmlGender": "FEMALE",
+    },
+}
 SCRIPT_WORD_PATTERN = re.compile(
     r'createWord\(\s*"(?P<id>[^"]+)",\s*"(?P<lemma>[^"]+)",\s*"(?P<definition_en>[^"]+)",\s*"(?P<definition_zh>[^"]+)"(?:,\s*"(?P<note_zh>[^"]*)")?\s*\)',
     re.DOTALL,
 )
 SCRIPT_LEXICON_CACHE = None
 BOOK_NOTES_CACHE = None
+GOOGLE_CREDENTIALS_CACHE = None
+GOOGLE_CREDENTIALS_CACHE_KEY = None
 
 GLOSSARY_REPLACEMENTS = [
     (r"\bjemand\b", "某人"),
@@ -115,6 +159,15 @@ def speed_to_edge_rate(speed):
     return f"{sign}{percent}%"
 
 
+def speed_to_google_rate(speed):
+    try:
+        numeric_speed = float(speed)
+    except (TypeError, ValueError):
+        numeric_speed = 1.0
+
+    return max(0.25, min(4.0, numeric_speed))
+
+
 def load_dotenv():
     if not ENV_FILE.exists():
         return
@@ -153,6 +206,108 @@ def save_env_value(key, value):
         updated.append(f"{key}={value}")
 
     ENV_FILE.write_text("\n".join(updated).strip() + "\n", encoding="utf-8")
+
+
+def get_tts_provider():
+    provider = normalize_space(os.environ.get("TTS_PROVIDER", "auto")).lower()
+    return provider if provider in {"auto", "edge", "google"} else "auto"
+
+
+def has_google_credentials_configured():
+    return bool(
+        normalize_space(os.environ.get("GOOGLE_TTS_CREDENTIALS_JSON"))
+        or normalize_space(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+        or normalize_space(os.environ.get("GOOGLE_TTS_CREDENTIALS_FILE"))
+        or normalize_space(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
+    )
+
+
+def google_tts_supported():
+    return requests is not None and GoogleAuthRequest is not None and service_account is not None and has_google_credentials_configured()
+
+
+def get_effective_tts_provider():
+    configured = get_tts_provider()
+
+    if configured == "google":
+        return "google"
+    if configured == "edge":
+        return "edge"
+    return "google" if google_tts_supported() else "edge"
+
+
+def build_google_credentials_cache_key():
+    return "||".join(
+        [
+            normalize_space(os.environ.get("GOOGLE_TTS_CREDENTIALS_JSON")),
+            normalize_space(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")),
+            normalize_space(os.environ.get("GOOGLE_TTS_CREDENTIALS_FILE")),
+            normalize_space(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")),
+            normalize_space(os.environ.get("GOOGLE_TTS_QUOTA_PROJECT")),
+            normalize_space(os.environ.get("GOOGLE_CLOUD_PROJECT")),
+        ]
+    )
+
+
+def get_google_credentials():
+    global GOOGLE_CREDENTIALS_CACHE
+    global GOOGLE_CREDENTIALS_CACHE_KEY
+
+    if requests is None or GoogleAuthRequest is None or service_account is None:
+        raise RuntimeError("Google TTS dependencies are not installed")
+
+    raw_json = normalize_space(os.environ.get("GOOGLE_TTS_CREDENTIALS_JSON") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+    credentials_file = normalize_space(os.environ.get("GOOGLE_TTS_CREDENTIALS_FILE") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
+
+    if not raw_json and not credentials_file:
+        raise RuntimeError("Google TTS credentials are not configured")
+
+    cache_key = build_google_credentials_cache_key()
+
+    if GOOGLE_CREDENTIALS_CACHE is not None and GOOGLE_CREDENTIALS_CACHE_KEY == cache_key:
+        return GOOGLE_CREDENTIALS_CACHE
+
+    scopes = [GOOGLE_TTS_SCOPE]
+
+    if raw_json:
+        try:
+            info = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid GOOGLE_TTS_CREDENTIALS_JSON: {exc}") from exc
+        credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    else:
+        credentials_path = Path(credentials_file)
+        if not credentials_path.exists():
+            raise RuntimeError(f"Google TTS credentials file not found: {credentials_path}")
+        credentials = service_account.Credentials.from_service_account_file(str(credentials_path), scopes=scopes)
+
+    quota_project = normalize_space(os.environ.get("GOOGLE_TTS_QUOTA_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT"))
+    if quota_project and hasattr(credentials, "with_quota_project"):
+        credentials = credentials.with_quota_project(quota_project)
+
+    GOOGLE_CREDENTIALS_CACHE = credentials
+    GOOGLE_CREDENTIALS_CACHE_KEY = cache_key
+    return credentials
+
+
+def resolve_edge_voice(voice):
+    requested = normalize_space(voice) or DEFAULT_VOICE
+    return EDGE_VOICE_MAP.get(requested, requested)
+
+
+def resolve_google_voice(voice):
+    requested = normalize_space(voice) or DEFAULT_VOICE
+    preset = GOOGLE_VOICE_MAP.get(requested)
+    if preset:
+        return dict(preset)
+
+    if re.fullmatch(r"[a-z]{2}-[A-Z]{2}", requested):
+        return {
+            "languageCode": requested,
+            "ssmlGender": "FEMALE",
+        }
+
+    return dict(GOOGLE_VOICE_MAP[DEFAULT_VOICE])
 
 
 def normalize_space(value):
@@ -617,15 +772,17 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        resolved_voice = VOICE_MAP.get(voice, voice) or DEFAULT_VOICE
+        provider = get_effective_tts_provider()
+        voice_descriptor = resolve_google_voice(voice) if provider == "google" else resolve_edge_voice(voice)
         cache_key = hashlib.sha256(
             json.dumps(
                 {
                     "version": CACHE_VERSION,
+                    "provider": provider,
                     "text": text,
-                    "voice": resolved_voice,
+                    "voice": voice_descriptor,
                     "format": audio_format,
-                    "rate": speed_to_edge_rate(speed),
+                    "rate": speed_to_google_rate(speed) if provider == "google" else speed_to_edge_rate(speed),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -635,10 +792,26 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if not cache_file.exists():
             try:
-                asyncio.run(generate_edge_tts(text, resolved_voice, cache_file, speed))
+                if provider == "google":
+                    generate_google_tts(text, voice_descriptor, cache_file, speed, audio_format)
+                else:
+                    asyncio.run(generate_edge_tts(text, voice_descriptor, cache_file, speed))
             except Exception as exc:
-                self.end_json(HTTPStatus.BAD_GATEWAY, {"error": f"edge-tts failed: {exc}"})
-                return
+                if provider == "google" and get_tts_provider() == "auto":
+                    try:
+                        fallback_voice = resolve_edge_voice(voice)
+                        asyncio.run(generate_edge_tts(text, fallback_voice, cache_file, speed))
+                    except Exception as fallback_exc:
+                        self.end_json(HTTPStatus.BAD_GATEWAY, {"error": f"Google TTS failed: {exc}; edge fallback failed: {fallback_exc}"})
+                        return
+                else:
+                    provider_label = "Google TTS" if provider == "google" else "edge-tts"
+                    self.end_json(HTTPStatus.BAD_GATEWAY, {"error": f"{provider_label} failed: {exc}"})
+                    return
+
+        if not cache_file.exists():
+            self.end_json(HTTPStatus.BAD_GATEWAY, {"error": "TTS audio generation failed"})
+            return
 
         audio_bytes = cache_file.read_bytes()
         self.send_response(HTTPStatus.OK)
@@ -685,6 +858,42 @@ class AppHandler(SimpleHTTPRequestHandler):
 async def generate_edge_tts(text, voice, cache_file, speed):
     communicate = edge_tts.Communicate(text, voice, rate=speed_to_edge_rate(speed))
     await communicate.save(str(cache_file))
+
+
+def generate_google_tts(text, voice_descriptor, cache_file, speed, audio_format):
+    credentials = get_google_credentials()
+    credentials.refresh(GoogleAuthRequest())
+
+    audio_encoding = "MP3" if audio_format.lower() == "mp3" else "LINEAR16"
+    payload = {
+        "input": {
+            "text": text,
+        },
+        "voice": voice_descriptor,
+        "audioConfig": {
+            "audioEncoding": audio_encoding,
+            "speakingRate": speed_to_google_rate(speed),
+        },
+    }
+
+    headers = {
+        "Authorization": f"Bearer {credentials.token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    quota_project = normalize_space(os.environ.get("GOOGLE_TTS_QUOTA_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT"))
+    if quota_project:
+        headers["x-goog-user-project"] = quota_project
+
+    response = requests.post(GOOGLE_TTS_ENDPOINT, headers=headers, json=payload, timeout=30)
+    if response.status_code >= 400:
+        raise RuntimeError(f"{response.status_code} {response.text[:400]}")
+
+    response_payload = response.json()
+    audio_content = response_payload.get("audioContent", "")
+    if not audio_content:
+        raise RuntimeError("Google TTS response did not include audioContent")
+
+    cache_file.write_bytes(base64.b64decode(audio_content))
 
 
 def main():

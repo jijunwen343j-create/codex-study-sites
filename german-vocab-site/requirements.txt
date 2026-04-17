@@ -1,1 +1,3 @@
 edge-tts
+google-auth
+requests
