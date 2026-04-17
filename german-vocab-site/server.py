@@ -17,10 +17,14 @@ sys.path.insert(0, str((Path(__file__).parent / ".vendor").resolve()))
 import edge_tts
 
 try:
+    import google.auth as google_auth
     import requests
+    from google.auth import exceptions as google_auth_exceptions
     from google.auth.transport.requests import Request as GoogleAuthRequest
     from google.oauth2 import service_account
 except Exception:
+    google_auth = None
+    google_auth_exceptions = None
     requests = None
     GoogleAuthRequest = None
     service_account = None
@@ -223,7 +227,14 @@ def has_google_credentials_configured():
 
 
 def google_tts_supported():
-    return requests is not None and GoogleAuthRequest is not None and service_account is not None and has_google_credentials_configured()
+    if requests is None or GoogleAuthRequest is None or google_auth is None:
+        return False
+
+    try:
+        get_google_credentials()
+        return True
+    except Exception:
+        return False
 
 
 def get_effective_tts_provider():
@@ -253,14 +264,11 @@ def get_google_credentials():
     global GOOGLE_CREDENTIALS_CACHE
     global GOOGLE_CREDENTIALS_CACHE_KEY
 
-    if requests is None or GoogleAuthRequest is None or service_account is None:
+    if requests is None or GoogleAuthRequest is None or google_auth is None:
         raise RuntimeError("Google TTS dependencies are not installed")
 
     raw_json = normalize_space(os.environ.get("GOOGLE_TTS_CREDENTIALS_JSON") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
     credentials_file = normalize_space(os.environ.get("GOOGLE_TTS_CREDENTIALS_FILE") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
-
-    if not raw_json and not credentials_file:
-        raise RuntimeError("Google TTS credentials are not configured")
 
     cache_key = build_google_credentials_cache_key()
 
@@ -269,17 +277,37 @@ def get_google_credentials():
 
     scopes = [GOOGLE_TTS_SCOPE]
 
-    if raw_json:
-        try:
-            info = json.loads(raw_json)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Invalid GOOGLE_TTS_CREDENTIALS_JSON: {exc}") from exc
-        credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    if raw_json or credentials_file:
+        if service_account is None:
+            raise RuntimeError("Google service account support is not available")
+
+        if raw_json:
+            try:
+                info = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Invalid GOOGLE_TTS_CREDENTIALS_JSON: {exc}") from exc
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        else:
+            credentials_path = Path(credentials_file)
+            if not credentials_path.exists():
+                raise RuntimeError(f"Google TTS credentials file not found: {credentials_path}")
+            credentials = service_account.Credentials.from_service_account_file(str(credentials_path), scopes=scopes)
     else:
-        credentials_path = Path(credentials_file)
-        if not credentials_path.exists():
-            raise RuntimeError(f"Google TTS credentials file not found: {credentials_path}")
-        credentials = service_account.Credentials.from_service_account_file(str(credentials_path), scopes=scopes)
+        try:
+            credentials, detected_project = google_auth.default(scopes=scopes)
+        except google_auth_exceptions.DefaultCredentialsError as exc:
+            raise RuntimeError(
+                "Google TTS credentials are not available. On Cloud Run, attach a service account to the service identity. "
+                "For local development, run gcloud auth application-default login or configure GOOGLE_TTS_CREDENTIALS_JSON."
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load Google Application Default Credentials: {exc}") from exc
+
+        if credentials is None:
+            raise RuntimeError("Google TTS credentials are not available")
+
+        if not os.environ.get("GOOGLE_CLOUD_PROJECT") and detected_project:
+            os.environ["GOOGLE_CLOUD_PROJECT"] = detected_project
 
     quota_project = normalize_space(os.environ.get("GOOGLE_TTS_QUOTA_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT"))
     if quota_project and hasattr(credentials, "with_quota_project"):
