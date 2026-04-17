@@ -637,25 +637,6 @@ function createCuratedWordId(topicId, sectionId, word) {
   return `curated-${topicId}-${sectionId}-${slugifyValue(word) || "word"}`;
 }
 
-function hasKnownWordAlias(wordText) {
-  const targetAliases = buildWordAliases(wordText);
-
-  if (!targetAliases.size) {
-    return false;
-  }
-
-  return categories.some((category) =>
-    category.topics.some((topic) =>
-      topic.sections.some((section) =>
-        section.words.some((word) => {
-          const existingAliases = buildWordAliases(word.word);
-          return [...targetAliases].some((alias) => existingAliases.has(alias));
-        })
-      )
-    )
-  );
-}
-
 function hydrateImportedUkrainianTopics() {
   const importedTopics = Array.isArray(window.IMPORTED_GERMAN_TOPICS) ? window.IMPORTED_GERMAN_TOPICS : [];
   const studyWorkCategory = categories.find((category) => category.id === "studium-und-arbeit");
@@ -685,7 +666,7 @@ function hydrateImportedUkrainianTopics() {
               return null;
             }
 
-            if (seenWordSignatures.has(signature) || hasKnownWordAlias(word)) {
+            if (seenWordSignatures.has(signature)) {
               return null;
             }
 
