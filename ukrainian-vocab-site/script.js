@@ -3127,7 +3127,18 @@ async function fetchTtsAudio(text, speed = 1, voice = store.voice) {
   });
 
   if (!response.ok) {
-    throw new Error(`TTS request failed with ${response.status}`);
+    let payload = null;
+
+    try {
+      payload = await response.json();
+    } catch (error) {
+      payload = null;
+    }
+
+    const error = new Error(payload?.error || `TTS request failed with ${response.status}`);
+    error.status = response.status;
+    error.code = payload?.code || "";
+    throw error;
   }
 
   const audioBlob = await response.blob();
@@ -3240,6 +3251,17 @@ async function speakWord(text, speed = 1, voice = store.voice) {
     await playFetchedAudio(audioBlob, text, currentToken);
     return;
   } catch (ttsError) {
+    if (ttsError?.status === 429 || ttsError?.code === "tts-limit-exceeded") {
+      if (audioState.token === currentToken) {
+        audioState.loadingText = null;
+        audioState.playingText = null;
+        refreshAudioButtons();
+      }
+
+      window.alert(ttsError.message || "今日语音额度已用完，请明天再试。");
+      return;
+    }
+
     try {
       if (audioState.token !== currentToken) {
         return;

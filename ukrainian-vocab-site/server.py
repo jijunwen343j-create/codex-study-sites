@@ -6,12 +6,15 @@ import mimetypes
 import os
 import re
 import sys
+import threading
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
+from zoneinfo import ZoneInfo
+from datetime import datetime
 
 sys.path.insert(0, str((Path(__file__).parent / ".vendor").resolve()))
 import edge_tts
@@ -32,11 +35,15 @@ except Exception:
 
 ROOT = Path(__file__).parent.resolve()
 CACHE_DIR = ROOT / ".cache" / "tts"
+USAGE_DIR = ROOT / ".cache" / "usage"
+TTS_USAGE_PATH = USAGE_DIR / "tts-usage.json"
 ENV_FILE = ROOT / ".env"
 CACHE_VERSION = "tts-v5"
 DEFAULT_VOICE = "uk-UA"
 DEFAULT_FORMAT = "mp3"
 DEFAULT_RATE = "0%"
+DEFAULT_TTS_DAILY_REQUEST_LIMIT = 300
+DEFAULT_TTS_DAILY_GENERATED_CHAR_LIMIT = 12000
 WORD_LOOKUP_ENDPOINT = "https://api.dictionaryapi.dev/api/v2/entries/en/"
 TRANSLATE_ENDPOINT = "https://api.mymemory.translated.net/get"
 GOOGLE_TTS_ENDPOINT = "https://texttospeech.googleapis.com/v1/text:synthesize"
@@ -97,6 +104,7 @@ SCRIPT_LEXICON_CACHE = None
 BOOK_NOTES_CACHE = None
 GOOGLE_CREDENTIALS_CACHE = None
 GOOGLE_CREDENTIALS_CACHE_KEY = None
+TTS_USAGE_LOCK = threading.Lock()
 
 GLOSSARY_REPLACEMENTS = [
     (r"\bjemand\b", "某人"),
@@ -347,6 +355,112 @@ def resolve_google_voice(voice):
 
 def normalize_space(value):
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def get_int_env(name, default=0):
+    raw_value = normalize_space(os.environ.get(name))
+
+    if not raw_value:
+        return default
+
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return default
+
+
+def get_usage_timezone():
+    timezone_name = normalize_space(os.environ.get("TTS_USAGE_TIMEZONE") or os.environ.get("TZ") or "UTC")
+
+    try:
+        return ZoneInfo(timezone_name)
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def get_tts_usage_limits():
+    return {
+        "dailyRequestLimit": get_int_env("TTS_DAILY_REQUEST_LIMIT", DEFAULT_TTS_DAILY_REQUEST_LIMIT),
+        "dailyGeneratedCharLimit": get_int_env("TTS_DAILY_GENERATED_CHAR_LIMIT", DEFAULT_TTS_DAILY_GENERATED_CHAR_LIMIT),
+    }
+
+
+def current_tts_usage_period():
+    return datetime.now(get_usage_timezone()).strftime("%Y-%m-%d")
+
+
+def load_tts_usage_state():
+    if not TTS_USAGE_PATH.exists():
+        return {}
+
+    try:
+        return json.loads(TTS_USAGE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_tts_usage_state(state):
+    USAGE_DIR.mkdir(parents=True, exist_ok=True)
+    TTS_USAGE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def build_tts_limit_payload(state, limits, exceeded):
+    return {
+        "error": "今日语音额度已用完，请明天再试。",
+        "code": "tts-limit-exceeded",
+        "limits": limits,
+        "usage": {
+            "period": state.get("period", current_tts_usage_period()),
+            "requests": state.get("requests", 0),
+            "generatedChars": state.get("generatedChars", 0),
+        },
+        "exceeded": exceeded,
+    }
+
+
+def reserve_tts_usage(text, count_generated_chars=False):
+    limits = get_tts_usage_limits()
+
+    if not limits["dailyRequestLimit"] and not limits["dailyGeneratedCharLimit"]:
+        return {"ok": True, "limits": limits, "usage": None}
+
+    added_chars = len(normalize_space(text)) if count_generated_chars else 0
+    period = current_tts_usage_period()
+
+    with TTS_USAGE_LOCK:
+        state = load_tts_usage_state()
+
+        if state.get("period") != period:
+            state = {
+                "period": period,
+                "requests": 0,
+                "generatedChars": 0,
+            }
+
+        next_requests = state.get("requests", 0) + 1
+        next_generated_chars = state.get("generatedChars", 0) + added_chars
+
+        if limits["dailyRequestLimit"] and next_requests > limits["dailyRequestLimit"]:
+            return {
+                "ok": False,
+                "payload": build_tts_limit_payload(state, limits, "requests"),
+            }
+
+        if limits["dailyGeneratedCharLimit"] and next_generated_chars > limits["dailyGeneratedCharLimit"]:
+            return {
+                "ok": False,
+                "payload": build_tts_limit_payload(state, limits, "generatedChars"),
+            }
+
+        state["requests"] = next_requests
+        state["generatedChars"] = next_generated_chars
+        save_tts_usage_state(state)
+
+    return {
+        "ok": True,
+        "limits": limits,
+        "usage": state,
+    }
 
 
 def normalize_latin_lookup_text(value):
@@ -827,6 +941,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             ).encode("utf-8")
         ).hexdigest()
         cache_file = CACHE_DIR / f"{cache_key}.{audio_format}"
+        usage_reservation = reserve_tts_usage(text, count_generated_chars=not cache_file.exists())
+
+        if not usage_reservation["ok"]:
+            self.end_json(HTTPStatus.TOO_MANY_REQUESTS, usage_reservation["payload"])
+            return
 
         if not cache_file.exists():
             try:
