@@ -633,8 +633,8 @@ function buildWordAliases(value) {
   return aliases;
 }
 
-function createCuratedWordId(topicId, sectionId, word) {
-  return `curated-${topicId}-${sectionId}-${slugifyValue(word) || "word"}`;
+function createCuratedWordId(topicId, sectionId, word, index = 0) {
+  return `curated-${topicId}-${sectionId}-${slugifyValue(word) || `word-${index + 1}`}`;
 }
 
 function hydrateImportedUkrainianTopics() {
@@ -652,26 +652,25 @@ function hydrateImportedUkrainianTopics() {
       continue;
     }
 
-    const seenWordSignatures = new Set();
     const sections = (rawTopic.sections || [])
       .map((rawSection) => {
         const words = (rawSection.words || [])
-          .map((rawWord) => {
+          .map((rawWord, wordIndex) => {
             const [word, definitionEn, definitionZh, noteZh = ""] = Array.isArray(rawWord)
               ? rawWord
               : [rawWord.word, rawWord.definitionEn, rawWord.definitionZh, rawWord.noteZh || ""];
-            const signature = [...buildWordAliases(word)].sort().join("|");
 
-            if (!word || !definitionEn || !definitionZh || !signature) {
+            if (!word || !definitionEn || !definitionZh) {
               return null;
             }
 
-            if (seenWordSignatures.has(signature)) {
-              return null;
-            }
-
-            seenWordSignatures.add(signature);
-            return createWord(createCuratedWordId(rawTopic.id, rawSection.id, word), word, definitionEn, definitionZh, noteZh);
+            return createWord(
+              createCuratedWordId(rawTopic.id, rawSection.id, word, wordIndex),
+              word,
+              definitionEn,
+              definitionZh,
+              noteZh
+            );
           })
           .filter(Boolean);
 
