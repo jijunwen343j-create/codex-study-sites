@@ -579,13 +579,13 @@ function getCurriculumTopicEntries() {
 
 function slugifyValue(value) {
   return normalizeLatinText(value)
-    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
     .replace(/^-+|-+$/g, "");
 }
 
 function normalizeWordLookup(value) {
   return normalizeLatinText(value)
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
